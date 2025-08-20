@@ -35,7 +35,7 @@ BOOL_TRUE  = {"true","1","yes","y","t"}
 BOOL_FALSE = {"false","0","no","n","f"}
 APP_DIR = Path(__file__).resolve().parent
 
-# ---------- Tips for specific filters ----------
+# ---------- Tips for specific filters (permanently visible) ----------
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+","", s.lower())
 
@@ -152,7 +152,7 @@ if not csv_path:
 df = pd.read_csv(csv_path, low_memory=False)
 st.caption(f"Loaded dataset: `{csv_path.name}` • {len(df):,} rows, {df.shape[1]} columns")
 
-# ---------- Sidebar: dynamic filters ----------
+# ---------- Sidebar: dynamic filters with PERMANENT tips ----------
 filters_meta = []
 with st.sidebar:
     st.header("🔎 Column Filters")
@@ -165,14 +165,14 @@ with st.sidebar:
 
         series = df[col]
         keybase = sanitize_key(col)
-        hint = tip_for(col)
         st.markdown(f"**{col}**")
+        hint = tip_for(col)
+        if hint:
+            st.caption(hint)  # ← permanent tip under the label
 
-        # ID-like (except PMID) → equals-any input
+        # ID-like (except PMID) → equals-any input (no tooltip help)
         if is_id_like(col):
-            base_help = "Enter one or more IDs separated by spaces, commas, or ';' (matches any)."
-            txt = st.text_input("Equals any of …", value="", key=keybase+"_idany",
-                                help=(hint or base_help))
+            txt = st.text_input("Equals any of …", value="", key=keybase+"_idany")
             filters_meta.append({"col": col, "type": "id_any", "value": txt})
             st.divider()
             continue
@@ -191,33 +191,28 @@ with st.sidebar:
             else:
                 vmin = 0.0; vmax = 0.0
             rng = st.slider("Range", min_value=float(vmin), max_value=float(vmax),
-                            value=(float(vmin), float(vmax)), key=keybase+"_range",
-                            help=hint)
+                            value=(float(vmin), float(vmax)), key=keybase+"_range")
             excl_na = st.checkbox("Exclude missing", value=False, key=keybase+"_exclna")
             filters_meta.append({"col": col, "type": "range", "value": rng, "excl_na": excl_na})
 
         elif try_dt:
             s_dt = coerce_datetime(series)
             dmin = s_dt.min().date(); dmax = s_dt.max().date()
-            date_range = st.date_input("Date range", (dmin, dmax), key=keybase+"_daterange",
-                                       help=hint)
+            date_range = st.date_input("Date range", (dmin, dmax), key=keybase+"_daterange")
             excl_na = st.checkbox("Exclude missing", value=False, key=keybase+"_exclna_dt")
             filters_meta.append({"col": col, "type": "date_range", "value": date_range, "excl_na": excl_na})
 
         elif try_bool:
-            choice = st.selectbox("Value", ["Any", "True", "False"], key=keybase+"_bool", help=hint)
+            choice = st.selectbox("Value", ["Any", "True", "False"], key=keybase+"_bool")
             filters_meta.append({"col": col, "type": "bool", "value": choice})
 
         else:
             tokens = tokenize_options(series.astype(str))
             if 0 < len(tokens) <= MAX_MULTISELECT_OPTIONS:
-                opts = ["Any"] + tokens
-                sel = st.multiselect("Select", opts, default=["Any"], key=keybase+"_multi", help=hint)
+                sel = st.multiselect("Select", ["Any"] + tokens, default=["Any"], key=keybase+"_multi")
                 filters_meta.append({"col": col, "type": "multi", "value": sel})
             else:
-                base_help = "Type one or more values separated by ';'. Matches if any appear (case-insensitive)."
-                query = st.text_input("Contains any of …", value="", key=keybase+"_contains",
-                                      help=(hint or base_help))
+                query = st.text_input("Contains any of …", value="", key=keybase+"_contains")
                 filters_meta.append({"col": col, "type": "contains_any", "value": query})
 
         st.divider()
