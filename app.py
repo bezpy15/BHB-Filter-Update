@@ -8,10 +8,12 @@ from pathlib import Path
 # Try AgGrid; fall back to st.dataframe if not installed
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder
+    from st_aggrid.shared import ColumnsAutoSizeMode   # ← add this
     HAVE_AGGRID = True
 except Exception:
     HAVE_AGGRID = False
     AgGrid = GridOptionsBuilder = None
+
 
 # ---------- Page ----------
 st.set_page_config(page_title="BHB Study Finder", page_icon="🔬", layout="wide")
@@ -259,11 +261,9 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
-# Bigger, paginated grid (see more than ~8 rows)
-page_size = 50 if len(result) >= 50 else max(20, len(result))
-rows_to_show = min(page_size, max(len(result), 1))
-row_h, header_h, footer_h = 28, 45, 70
-grid_height = min(900, header_h + row_h * rows_to_show + footer_h)
+# Bigger grid + pagination; do NOT force-fit columns (keep horizontal scroll)
+page_size = 50
+grid_height = 720  # tall enough; tweak if you want
 
 if HAVE_AGGRID:
     gob = GridOptionsBuilder.from_dataframe(result)
@@ -271,17 +271,23 @@ if HAVE_AGGRID:
         gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
     except TypeError:
         gob.configure_pagination(paginationPageSize=page_size)
-    gob.configure_default_column(filter=True, sortable=True, resizable=True)
-    gob.configure_grid_options(domLayout='normal')
+
+    # keep widths readable; allow resize; don't wrap
+    gob.configure_default_column(filter=True, sortable=True, resizable=True, minWidth=140, wrapText=False)
+
+    # normal layout shows horizontal scrollbar when needed
+    gob.configure_grid_options(domLayout="normal")
+
     AgGrid(
         result,
         gridOptions=gob.build(),
         height=grid_height,
         theme="alpine",
-        fit_columns_on_grid_load=True,
+        fit_columns_on_grid_load=False,                    # ← critical: no sizeColumnsToFit
+        columns_auto_size_mode=ColumnsAutoSizeMode.NO_AUTOSIZE,  # or .FIT_CONTENTS if you prefer
     )
 else:
-    st.info("Interactive grid unavailable (streamlit-aggrid not installed). Showing a simple table instead.")
+    # fallback table (also not squished)
     st.dataframe(result, use_container_width=True, height=grid_height)
 
 st.download_button(
