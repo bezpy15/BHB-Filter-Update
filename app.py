@@ -34,13 +34,16 @@ BOOL_TRUE  = {"true","1","yes","y","t"}
 BOOL_FALSE = {"false","0","no","n","f"}
 APP_DIR = Path(__file__).resolve().parent
 
-# ---------- Helpers (define BEFORE use) ----------
+# ---------- Helpers ----------
 def normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
 
 def is_id_like(colname: str) -> bool:
     n = normalize(colname)
-    return n in {"pmid","abstractid","pmcid","id","aid"} or n.endswith("id")
+    return n in {"abstractid","pmcid","id","aid"} or n.endswith("id")
+
+def is_pmid_col(colname: str) -> bool:
+    return normalize(colname) == "pmid"
 
 def sanitize_key(s: str) -> str:
     return "flt_" + re.sub(r"[^a-zA-Z0-9_]", "_", s)
@@ -105,90 +108,57 @@ def clear_all_filters():
             del st.session_state[k]
     st.rerun()
 
-def discover_csv_candidates():
-    cand = []
+def discover_repo_csv() -> Path | None:
     # Highest priority: explicit path via secrets/env
     if "DATASET_PATH" in st.secrets:
-        cand.append((APP_DIR / st.secrets["DATASET_PATH"]).resolve())
+        p = (APP_DIR / st.secrets["DATASET_PATH"]).resolve()
+        if p.exists():
+            return p
     if os.environ.get("DATASET_PATH"):
-        cand.append((APP_DIR / os.environ["DATASET_PATH"]).resolve())
-    # Common defaults (root-first)
-    cand += [
-        (APP_DIR / "bhb_studies.csv").resolve(),
-        (APP_DIR / "studies.csv").resolve(),
-        (APP_DIR / "dataset.csv").resolve(),
-    ]
-    # Glob any CSV in root (and ./data if present)
-    cand += [p.resolve() for p in APP_DIR.glob("*.csv")]
+        p = (APP_DIR / os.environ["DATASET_PATH"]).resolve()
+        if p.exists():
+            return p
+    # Common names in repo root (you said there are no folders)
+    for name in ("bhb_studies.csv", "studies.csv", "dataset.csv"):
+        p = (APP_DIR / name).resolve()
+        if p.exists():
+            return p
+    # Otherwise pick the first CSV in root (or ./data if added later)
+    candidates = list(APP_DIR.glob("*.csv"))
     data_dir = APP_DIR / "data"
-    if data_dir.exists():
-        cand += [p.resolve() for p in data_dir.glob("*.csv")]
-    # De-dup & keep existing CSVs
-    out, seen = [], set()
-    for p in cand:
-        if p.exists() and p.suffix.lower() == ".csv" and str(p) not in seen:
-            seen.add(str(p)); out.append(p)
-    return out
+    if not candidates and data_dir.exists():
+        candidates = list(data_dir.glob("*.csv"))
+    return candidates[0].resolve() if candidates else None
 
-# ---------- Data source (repo root CSV or upload) ----------
-with st.sidebar:
-    st.header("📦 Dataset")
-    uploaded = st.file_uploader("Override (CSV/Excel, optional)", type=["csv", "xlsx", "xls"])
-    discovered = discover_csv_candidates()
-    choice = None
-    if discovered:
-        labels = [str(p.relative_to(APP_DIR)) for p in discovered]
-        choice = st.selectbox("Choose repo CSV", options=labels, index=0)
-    st.button("🔁 Reset all filters", on_click=clear_all_filters)
-
-df, src_label = None, ""
-
-# 1) Manual upload wins
-if uploaded is not None:
-    try:
-        if uploaded.name.lower().endswith(".csv"):
-            df = pd.read_csv(uploaded, low_memory=False)
-        else:
-            df = pd.read_excel(uploaded)
-        src_label = f"Loaded (upload): {uploaded.name}"
-    except Exception as e:
-        st.error(f"Failed to read uploaded file: {e}")
-
-# 2) Selected/only repo CSV
-if df is None and choice is not None:
-    repo_path = (APP_DIR / choice).resolve()
-    try:
-        if repo_path.suffix.lower() == ".csv":
-            df = pd.read_csv(repo_path, low_memory=False)
-        else:
-            df = pd.read_excel(repo_path)
-        src_label = f"Loaded (repo): {choice}"
-    except Exception as e:
-        st.error(f"Failed to read repo file '{choice}': {e}")
-
-# 3) Final guard
-if df is None:
+# ---------- Data source (no dataset UI; auto-load from repo) ----------
+csv_path = discover_repo_csv()
+if not csv_path:
     st.error(
-        "No dataset found. Put a CSV in the repo root (e.g., `bhb_studies.csv`) or set "
-        "`DATASET_PATH` in Streamlit Secrets (e.g., `DATASET_PATH=\"yourfile.csv\"`). "
-        "You can also use the uploader in the sidebar."
+        "No dataset found. Put a CSV in the repo root (e.g., `bhb_studies.csv`) "
+        "or set `DATASET_PATH` in Streamlit Secrets."
     )
     st.stop()
 
-st.caption(src_label)
+df = pd.read_csv(csv_path, low_memory=False)
+st.caption(f"Loaded dataset: `{csv_path.name}` • {len(df):,} rows, {df.shape[1]} columns")
 
-# ---------- Sidebar: dynamic filters ----------
+# ---------- Sidebar: dynamic filters (ALL in left menu) ----------
 filters_meta = []
 with st.sidebar:
     st.header("🔎 Column Filters")
     st.caption("Filters apply cumulatively.")
+    st.button("🔁 Reset all filters", on_click=clear_all_filters)
 
     for col in df.columns:
+        # Skip PMID filter entirely (but keep the column visible in the table)
+        if is_pmid_col(col):
+            continue
+
         series = df[col]
         keybase = sanitize_key(col)
         st.markdown(f"**{col}**")
 
-        # ID-like columns → equals-any input (no sliders)
+        # ID-like (except PMID) → equals-any input
         if is_id_like(col):
             help_txt = "Enter one or more IDs separated by spaces, commas, or ';' (matches any)."
             txt = st.text_input("Equals any of …", value="", key=keybase+"_idany", help=help_txt)
@@ -242,9 +212,7 @@ with st.sidebar:
 mask = pd.Series([True] * len(df))
 
 for f in filters_meta:
-    col = f["col"]
-    typ = f["type"]
-    val = f["value"]
+    col = f["col"]; typ = f["type"]; val = f["value"]
 
     if typ == "id_any":
         ids = parse_id_equals_any(val)
@@ -270,8 +238,7 @@ for f in filters_meta:
 
     elif typ == "bool":
         if val in ("True", "False"):
-            s_b = coerce_bool(df[col])
-            want = True if val == "True" else False
+            s_b = coerce_bool(df[col]); want = (val == "True")
             mask &= (s_b == want)
 
     elif typ == "multi":
@@ -292,14 +259,30 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
+# Bigger, paginated grid (see more than ~8 rows)
+page_size = 50 if len(result) >= 50 else max(20, len(result))
+rows_to_show = min(page_size, max(len(result), 1))
+row_h, header_h, footer_h = 28, 45, 70
+grid_height = min(900, header_h + row_h * rows_to_show + footer_h)
+
 if HAVE_AGGRID:
     gob = GridOptionsBuilder.from_dataframe(result)
-    gob.configure_pagination(paginationPageSize=20)
+    try:
+        gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
+    except TypeError:
+        gob.configure_pagination(paginationPageSize=page_size)
     gob.configure_default_column(filter=True, sortable=True, resizable=True)
-    AgGrid(result, gridOptions=gob.build(), height=450, theme="alpine")
+    gob.configure_grid_options(domLayout='normal')
+    AgGrid(
+        result,
+        gridOptions=gob.build(),
+        height=grid_height,
+        theme="alpine",
+        fit_columns_on_grid_load=True,
+    )
 else:
     st.info("Interactive grid unavailable (streamlit-aggrid not installed). Showing a simple table instead.")
-    st.dataframe(result, use_container_width=True)
+    st.dataframe(result, use_container_width=True, height=grid_height)
 
 st.download_button(
     "💾 Excel",
