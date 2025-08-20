@@ -34,10 +34,93 @@ BOOL_TRUE  = {"true","1","yes","y","t"}
 BOOL_FALSE = {"false","0","no","n","f"}
 
 # Path inside your repo (commit your CSV here)
-DEFAULT_LOCAL_PATH = os.environ.get("DATASET_PATH", "data/bhb_studies.csv")
-# You can also set DATASET_PATH in Streamlit Secrets if you prefer:
-if "DATASET_PATH" in st.secrets:
-    DEFAULT_LOCAL_PATH = st.secrets["DATASET_PATH"]
+# ---------- Data source (auto-discover repo CSV; optional upload override) ----------
+from pathlib import Path
+APP_DIR = Path(__file__).resolve().parent
+
+def discover_csv_candidates():
+    cand = []
+
+    # Highest priority: explicit path via secrets/env
+    if "DATASET_PATH" in st.secrets:
+        cand.append(APP_DIR / st.secrets["DATASET_PATH"])
+    if os.environ.get("DATASET_PATH"):
+        cand.append(APP_DIR / os.environ["DATASET_PATH"])
+
+    # Common defaults (root-first since you have no folders)
+    cand += [
+        APP_DIR / "bhb_studies.csv",
+        APP_DIR / "studies.csv",
+        APP_DIR / "dataset.csv",
+        APP_DIR / "data" / "bhb_studies.csv",   # future-proof
+        APP_DIR / "data" / "studies.csv",
+        APP_DIR / "data" / "dataset.csv",
+    ]
+
+    # Then glob any CSV in root and ./data
+    cand += list(APP_DIR.glob("*.csv"))
+    if (APP_DIR / "data").exists():
+        cand += list((APP_DIR / "data").glob("*.csv"))
+
+    # De-dup & keep only existing files
+    seen, out = set(), []
+    for p in cand:
+        p = p.resolve()
+        if p.exists() and p.suffix.lower() == ".csv" and str(p) not in seen:
+            seen.add(str(p)); out.append(p)
+    return out
+
+with st.sidebar:
+    st.header("📦 Dataset")
+    uploaded = st.file_uploader("Override (CSV/Excel, optional)", type=["csv", "xlsx", "xls"])
+
+    discovered = discover_csv_candidates()
+    choice = None
+    if discovered:
+        # If there’s only one CSV, preselect it
+        labels = [str(p.relative_to(APP_DIR)) for p in discovered]
+        default_index = 0
+        choice = st.selectbox("Choose repo CSV", options=labels, index=default_index)
+
+    st.button("🔁 Reset all filters", on_click=clear_all_filters)
+
+df, src_label = None, ""
+
+# 1) Manual upload wins
+if uploaded is not None:
+    try:
+        if uploaded.name.lower().endswith(".csv"):
+            df = pd.read_csv(uploaded, low_memory=False)
+        else:
+            df = pd.read_excel(uploaded)
+        src_label = f"Loaded (upload): {uploaded.name}"
+    except Exception as e:
+        st.error(f"Failed to read uploaded file: {e}")
+
+# 2) Selected/only repo CSV
+if df is None and choice is not None:
+    repo_path = APP_DIR / choice
+    try:
+        if repo_path.suffix.lower() == ".csv":
+            df = pd.read_csv(repo_path, low_memory=False)
+        else:
+            df = pd.read_excel(repo_path)
+        src_label = f"Loaded (repo): {choice}"
+    except Exception as e:
+        st.error(f"Failed to read repo file '{choice}': {e}")
+
+# 3) Final guard
+if df is None:
+    st.error(
+        "No dataset found. Put a CSV in the repo root (e.g., `bhb_studies.csv`) "
+        "or set `DATASET_PATH` in Streamlit Secrets (e.g., `DATASET_PATH=\"yourfile.csv\"`). "
+        "You can also use the uploader in the sidebar."
+    )
+    st.stop()
+
+st.caption(src_label)
+
+
 
 # ---------- Helpers ----------
 def normalize(name: str) -> str:
