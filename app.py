@@ -1,13 +1,17 @@
 # ==========================================================
 # BHB Study Finder — Dynamic Column Filters (repo CSV)
 # ==========================================================
-import os
-import re
-import numpy as np
-import pandas as pd
-import streamlit as st
 from io import BytesIO
-from st_aggrid import AgGrid, GridOptionsBuilder
+import re, os, numpy as np, pandas as pd, streamlit as st
+
+# Try AgGrid; fall back to st.dataframe if not installed yet
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder
+    HAVE_AGGRID = True
+except Exception as e:
+    HAVE_AGGRID = False
+    AgGrid = GridOptionsBuilder = None
+
 
 # ---------- Page ----------
 st.set_page_config(page_title="BHB Study Finder", page_icon="🔬", layout="wide")
@@ -262,10 +266,14 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
-gob = GridOptionsBuilder.from_dataframe(result)
-gob.configure_pagination(paginationPageSize=20)
-gob.configure_default_column(filter=True, sortable=True, resizable=True)
-AgGrid(result, gridOptions=gob.build(), height=450, theme="alpine")
+if HAVE_AGGRID:
+    gob = GridOptionsBuilder.from_dataframe(result)
+    gob.configure_pagination(paginationPageSize=20)
+    gob.configure_default_column(filter=True, sortable=True, resizable=True)
+    AgGrid(result, gridOptions=gob.build(), height=450, theme="alpine")
+else:
+    st.info("Interactive grid unavailable (streamlit-aggrid not installed). Showing a simple table instead.")
+    st.dataframe(result, use_container_width=True)
 
 st.download_button(
     "💾 Excel",
