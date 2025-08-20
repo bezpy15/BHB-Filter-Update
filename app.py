@@ -8,12 +8,11 @@ from pathlib import Path
 # Try AgGrid; fall back to st.dataframe if not installed
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder
-    from st_aggrid.shared import ColumnsAutoSizeMode   # ← add this
+    from st_aggrid.shared import ColumnsAutoSizeMode  # keep widths natural
     HAVE_AGGRID = True
 except Exception:
     HAVE_AGGRID = False
     AgGrid = GridOptionsBuilder = None
-
 
 # ---------- Page ----------
 st.set_page_config(page_title="BHB Study Finder", page_icon="🔬", layout="wide")
@@ -36,6 +35,21 @@ BOOL_TRUE  = {"true","1","yes","y","t"}
 BOOL_FALSE = {"false","0","no","n","f"}
 APP_DIR = Path(__file__).resolve().parent
 
+# ---------- Tips for specific filters ----------
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+","", s.lower())
+
+TIPS = {
+    _norm("BHB Filter"): "Filter via official gene names like **NLRP3**, **UCP1**, etc.",
+    _norm("Model Raw"): "Study model as extracted from the abstract, e.g. **Wistar rat**, **healthy human adults**.",
+    _norm("Model Global"): "Select **in vitro**, **animal**, or **human**.",
+    _norm("Model Canonical"): "Categorized broad models such as **Ex vivo**, **Mouse**, **In silico**, etc.",
+    _norm("Model Cannonical"): "Categorized broad models such as **Ex vivo**, **Mouse**, **In silico**, etc.",
+    _norm("Mechanism Raw"): "Studied mechanism as extracted from the abstract, e.g. **lipolysis**, **mitochondrial complex II activation**.",
+    _norm("Mechanism Canonical"): "Broader categories such as **Mitochondrial Function & Bioenergetics** or **Metabolic Regulation**.",
+    _norm("Mechanism Cannonical"): "Broader categories such as **Mitochondrial Function & Bioenergetics** or **Metabolic Regulation**.",
+}
+
 # ---------- Helpers ----------
 def normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
@@ -49,6 +63,9 @@ def is_pmid_col(colname: str) -> bool:
 
 def sanitize_key(s: str) -> str:
     return "flt_" + re.sub(r"[^a-zA-Z0-9_]", "_", s)
+
+def tip_for(colname: str) -> str | None:
+    return TIPS.get(_norm(colname))
 
 def tokenize_options(series: pd.Series) -> list:
     vals = set()
@@ -111,21 +128,15 @@ def clear_all_filters():
     st.rerun()
 
 def discover_repo_csv() -> Path | None:
-    # Highest priority: explicit path via secrets/env
     if "DATASET_PATH" in st.secrets:
         p = (APP_DIR / st.secrets["DATASET_PATH"]).resolve()
-        if p.exists():
-            return p
+        if p.exists(): return p
     if os.environ.get("DATASET_PATH"):
         p = (APP_DIR / os.environ["DATASET_PATH"]).resolve()
-        if p.exists():
-            return p
-    # Common names in repo root (you said there are no folders)
+        if p.exists(): return p
     for name in ("bhb_studies.csv", "studies.csv", "dataset.csv"):
         p = (APP_DIR / name).resolve()
-        if p.exists():
-            return p
-    # Otherwise pick the first CSV in root (or ./data if added later)
+        if p.exists(): return p
     candidates = list(APP_DIR.glob("*.csv"))
     data_dir = APP_DIR / "data"
     if not candidates and data_dir.exists():
@@ -135,16 +146,13 @@ def discover_repo_csv() -> Path | None:
 # ---------- Data source (no dataset UI; auto-load from repo) ----------
 csv_path = discover_repo_csv()
 if not csv_path:
-    st.error(
-        "No dataset found. Put a CSV in the repo root (e.g., `bhb_studies.csv`) "
-        "or set `DATASET_PATH` in Streamlit Secrets."
-    )
+    st.error("No dataset found. Put a CSV in the repo root (e.g., `bhb_studies.csv`) or set `DATASET_PATH` in Secrets.")
     st.stop()
 
 df = pd.read_csv(csv_path, low_memory=False)
 st.caption(f"Loaded dataset: `{csv_path.name}` • {len(df):,} rows, {df.shape[1]} columns")
 
-# ---------- Sidebar: dynamic filters (ALL in left menu) ----------
+# ---------- Sidebar: dynamic filters ----------
 filters_meta = []
 with st.sidebar:
     st.header("🔎 Column Filters")
@@ -152,18 +160,19 @@ with st.sidebar:
     st.button("🔁 Reset all filters", on_click=clear_all_filters)
 
     for col in df.columns:
-        # Skip PMID filter entirely (but keep the column visible in the table)
-        if is_pmid_col(col):
+        if is_pmid_col(col):  # keep column visible but don't render a filter for it
             continue
 
         series = df[col]
         keybase = sanitize_key(col)
+        hint = tip_for(col)
         st.markdown(f"**{col}**")
 
         # ID-like (except PMID) → equals-any input
         if is_id_like(col):
-            help_txt = "Enter one or more IDs separated by spaces, commas, or ';' (matches any)."
-            txt = st.text_input("Equals any of …", value="", key=keybase+"_idany", help=help_txt)
+            base_help = "Enter one or more IDs separated by spaces, commas, or ';' (matches any)."
+            txt = st.text_input("Equals any of …", value="", key=keybase+"_idany",
+                                help=(hint or base_help))
             filters_meta.append({"col": col, "type": "id_any", "value": txt})
             st.divider()
             continue
@@ -182,73 +191,67 @@ with st.sidebar:
             else:
                 vmin = 0.0; vmax = 0.0
             rng = st.slider("Range", min_value=float(vmin), max_value=float(vmax),
-                            value=(float(vmin), float(vmax)), key=keybase+"_range")
+                            value=(float(vmin), float(vmax)), key=keybase+"_range",
+                            help=hint)
             excl_na = st.checkbox("Exclude missing", value=False, key=keybase+"_exclna")
             filters_meta.append({"col": col, "type": "range", "value": rng, "excl_na": excl_na})
 
         elif try_dt:
             s_dt = coerce_datetime(series)
             dmin = s_dt.min().date(); dmax = s_dt.max().date()
-            date_range = st.date_input("Date range", (dmin, dmax), key=keybase+"_daterange")
+            date_range = st.date_input("Date range", (dmin, dmax), key=keybase+"_daterange",
+                                       help=hint)
             excl_na = st.checkbox("Exclude missing", value=False, key=keybase+"_exclna_dt")
             filters_meta.append({"col": col, "type": "date_range", "value": date_range, "excl_na": excl_na})
 
         elif try_bool:
-            choice = st.selectbox("Value", ["Any", "True", "False"], key=keybase+"_bool")
+            choice = st.selectbox("Value", ["Any", "True", "False"], key=keybase+"_bool", help=hint)
             filters_meta.append({"col": col, "type": "bool", "value": choice})
 
         else:
             tokens = tokenize_options(series.astype(str))
             if 0 < len(tokens) <= MAX_MULTISELECT_OPTIONS:
                 opts = ["Any"] + tokens
-                sel = st.multiselect("Select", opts, default=["Any"], key=keybase+"_multi")
+                sel = st.multiselect("Select", opts, default=["Any"], key=keybase+"_multi", help=hint)
                 filters_meta.append({"col": col, "type": "multi", "value": sel})
             else:
-                help_txt = "Type one or more values separated by ';'. Matches if any appear (case-insensitive)."
-                query = st.text_input("Contains any of …", value="", help=help_txt, key=keybase+"_contains")
+                base_help = "Type one or more values separated by ';'. Matches if any appear (case-insensitive)."
+                query = st.text_input("Contains any of …", value="", key=keybase+"_contains",
+                                      help=(hint or base_help))
                 filters_meta.append({"col": col, "type": "contains_any", "value": query})
 
         st.divider()
 
 # ---------- Apply filters ----------
 mask = pd.Series([True] * len(df))
-
 for f in filters_meta:
     col = f["col"]; typ = f["type"]; val = f["value"]
-
     if typ == "id_any":
         ids = parse_id_equals_any(val)
         if ids:
             mask &= df[col].astype(str).isin(ids)
-
     elif typ == "range":
         lo, hi = val
         s_num = coerce_numeric(df[col])
         cond = s_num.between(lo, hi)
-        if not f.get("excl_na", False):
-            cond = cond | s_num.isna()
+        if not f.get("excl_na", False): cond = cond | s_num.isna()
         mask &= cond
-
     elif typ == "date_range":
         s_dt = coerce_datetime(df[col])
         if isinstance(val, tuple) and len(val) == 2:
             lo, hi = pd.to_datetime(val[0]), pd.to_datetime(val[1])
             cond = s_dt.between(lo, hi)
-            if not f.get("excl_na", False):
-                cond = cond | s_dt.isna()
+            if not f.get("excl_na", False): cond = cond | s_dt.isna()
             mask &= cond
-
     elif typ == "bool":
         if val in ("True", "False"):
             s_b = coerce_bool(df[col]); want = (val == "True")
             mask &= (s_b == want)
-
     elif typ == "multi":
         sel = [s for s in val if s != "Any"]
         if sel:
             sel_set = set(sel)
             mask &= df[col].apply(lambda v: match_tokens(v, sel_set))
-
     elif typ == "contains_any":
         query = str(val).strip()
         if query:
@@ -261,9 +264,8 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
-# Bigger grid + pagination; do NOT force-fit columns (keep horizontal scroll)
 page_size = 50
-grid_height = 720  # tall enough; tweak if you want
+grid_height = 720
 
 if HAVE_AGGRID:
     gob = GridOptionsBuilder.from_dataframe(result)
@@ -271,23 +273,17 @@ if HAVE_AGGRID:
         gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
     except TypeError:
         gob.configure_pagination(paginationPageSize=page_size)
-
-    # keep widths readable; allow resize; don't wrap
     gob.configure_default_column(filter=True, sortable=True, resizable=True, minWidth=140, wrapText=False)
-
-    # normal layout shows horizontal scrollbar when needed
     gob.configure_grid_options(domLayout="normal")
-
     AgGrid(
         result,
         gridOptions=gob.build(),
         height=grid_height,
         theme="alpine",
-        fit_columns_on_grid_load=False,                    # ← critical: no sizeColumnsToFit
-        columns_auto_size_mode=ColumnsAutoSizeMode.NO_AUTOSIZE,  # or .FIT_CONTENTS if you prefer
+        fit_columns_on_grid_load=False,
+        columns_auto_size_mode=ColumnsAutoSizeMode.NO_AUTOSIZE,
     )
 else:
-    # fallback table (also not squished)
     st.dataframe(result, use_container_width=True, height=grid_height)
 
 st.download_button(
