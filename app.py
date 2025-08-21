@@ -301,7 +301,7 @@ for f in filters_meta:
         if isinstance(val, tuple) and len(val) == 2:
             lo, hi = pd.to_datetime(val[0]), pd.to_datetime(val[1])
             cond = s_dt.between(lo, hi)
-            if not f.get("excl_na", False):
+        if not f.get("excl_na", False):
             cond = cond | s_dt.isna()
         mask &= cond
     elif typ == "bool":
