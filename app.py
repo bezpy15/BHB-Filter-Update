@@ -313,27 +313,48 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
-PAGE_SIZE = 20
+PAGE_SIZE  = 20
 GRID_HEIGHT = 600
 
 if HAVE_AGGRID:
     st.caption("✅ AgGrid active (theme: alpine, paginated).")
-    gob = GridOptionsBuilder.from_dataframe(result)
-    try:
-        gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=PAGE_SIZE)
-    except TypeError:
-        gob.configure_pagination(paginationPageSize=PAGE_SIZE)
-    gob.configure_default_column(filter=True, sortable=True, resizable=True)
-    gob.configure_grid_options(domLayout="normal")  # keep pagination bar and horizontal scroll
 
+    # Build from dataframe (lets st_aggrid create correct columnDefs/rowData)
+    gob = GridOptionsBuilder.from_dataframe(result)
+
+    # Nice defaults; DO NOT fit-to-view (keeps widths readable + horiz. scroll)
+    gob.configure_default_column(filter=True, sortable=True, resizable=True, wrapText=False, minWidth=140)
+
+    # Ask for normal layout (shows pagination bar)
+    gob.configure_grid_options(domLayout="normal")
+
+    # Build options, then *force* pagination keys on the final dict
     grid_opts = gob.build()
+    grid_opts["pagination"] = True
+    grid_opts["paginationAutoPageSize"] = False
+    grid_opts["paginationPageSize"] = PAGE_SIZE
+    grid_opts["suppressPaginationPanel"] = False
+
+    # Sanity readout (also printed to logs)
+    st.caption(
+        f"Pagination: {grid_opts.get('pagination')} • "
+        f"Page size: {grid_opts.get('paginationPageSize')} • "
+        f"Layout: {grid_opts.get('domLayout')}"
+    )
+    print("[AgGrid] gridOptions ->",
+          "pagination:", grid_opts.get("pagination"),
+          "pageSize:", grid_opts.get("paginationPageSize"),
+          "domLayout:", grid_opts.get("domLayout"))
+
     AgGrid(
         result,
         gridOptions=grid_opts,
         height=GRID_HEIGHT,
         theme="alpine",
-        fit_columns_on_grid_load=False,  # no horizontal squish
+        fit_columns_on_grid_load=False,  # avoid squish
         columns_auto_size_mode=(ColumnsAutoSizeMode.FIT_CONTENTS if ColumnsAutoSizeMode else None),
+        reload_data=True,                # ensure grid refreshes after filter changes
+        key="main_grid",
     )
 else:
     st.caption("⚠️ Falling back to simple table (AgGrid not loaded).")
@@ -353,6 +374,7 @@ st.download_button(
     "filtered_rows.csv",
     mime="text/csv",
 )
+
 
 # ---------- Debug expander ----------
 with st.sidebar.expander("🪲 Grid debug", expanded=False):
