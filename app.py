@@ -325,28 +325,41 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
-page_size = 50
-grid_height = 720
+# Classic AgGrid look: paginated, readable column widths, horizontal scroll allowed
+PAGE_SIZE = 20
+GRID_HEIGHT = 600
 
 if HAVE_AGGRID:
     gob = GridOptionsBuilder.from_dataframe(result)
+
+    # Pagination like your original screenshot/code
     try:
-        gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
+        gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=PAGE_SIZE)
     except TypeError:
-        gob.configure_pagination(paginationPageSize=page_size)
-    gob.configure_default_column(filter=True, sortable=True, resizable=True, minWidth=140, wrapText=False)
+        gob.configure_pagination(paginationPageSize=PAGE_SIZE)
+
+    # Column defaults: keep funnels, sorting, resizing; do NOT force-fit
+    gob.configure_default_column(filter=True, sortable=True, resizable=True)
+
+    # Make sure the grid doesn't expand to full height (which hides pagination)
     gob.configure_grid_options(domLayout="normal")
+
+    # Build & render
+    grid_opts = gob.build()
     AgGrid(
         result,
-        gridOptions=gob.build(),
-        height=grid_height,
+        gridOptions=grid_opts,
+        height=GRID_HEIGHT,
         theme="alpine",
-        fit_columns_on_grid_load=False,
-        columns_auto_size_mode=(ColumnsAutoSizeMode.NO_AUTOSIZE if ColumnsAutoSizeMode else None),
+        fit_columns_on_grid_load=False,  # critical: no sizeColumnsToFit squish
+        # If your st-aggrid exposes this import, FIT_CONTENTS keeps widths natural.
+        columns_auto_size_mode=(
+            ColumnsAutoSizeMode.FIT_CONTENTS if ColumnsAutoSizeMode else None
+        ),
     )
 else:
     st.info("Interactive grid unavailable (streamlit-aggrid not installed). Showing a simple table instead.")
-    st.dataframe(result, use_container_width=True, height=grid_height)
+    st.dataframe(result, use_container_width=True, height=GRID_HEIGHT)
 
 st.download_button(
     "💾 Excel",
@@ -360,6 +373,7 @@ st.download_button(
     "filtered_rows.csv",
     mime="text/csv",
 )
+
 
 # ---------- Debug panel (shows in UI AND prints to logs) ----------
 with st.sidebar.expander("🪲 Debug", expanded=False):
