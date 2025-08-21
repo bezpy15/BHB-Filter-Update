@@ -1,18 +1,9 @@
 # ==========================================================
-# BHB Study Finder — Dynamic Column Filters (repo CSV/root)
+# BHB Study Finder — Dynamic Column Filters (repo CSV/root + AgGrid debug)
 # ==========================================================
 from io import BytesIO
-import os, re, numpy as np, pandas as pd, streamlit as st
+import os, re, sys, traceback, numpy as np, pandas as pd, streamlit as st
 from pathlib import Path
-
-# Try AgGrid; fall back to st.dataframe if not installed
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder
-    from st_aggrid.shared import ColumnsAutoSizeMode  # keep widths natural
-    HAVE_AGGRID = True
-except Exception:
-    HAVE_AGGRID = False
-    AgGrid = GridOptionsBuilder = None
 
 # ---------- Page ----------
 st.set_page_config(page_title="BHB Study Finder", page_icon="🔬", layout="wide")
@@ -28,6 +19,25 @@ This filter tool uses AI to extract information from abstracts. The text exactly
 Processing of the extracted data should make much easier for researchers to find studies most relevant to their interest. As big part of BHB research focus on its signalling effect, AI was also used to extract proposed targets of BHB from each of the abstracts. Targets are standardized to their official gene names so they can be quickly used for enrichment analysis and other bioinformatics tools.
 """)
 
+# ---------- AgGrid import with diagnostics ----------
+AGGRID_IMPORT_ERR = None
+HAVE_AGGRID = False
+ColumnsAutoSizeMode = None
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder
+    try:
+        from st_aggrid.shared import ColumnsAutoSizeMode
+    except Exception:
+        ColumnsAutoSizeMode = None  # older versions don't expose this
+    HAVE_AGGRID = True
+    print("[AgGrid] Import successful.")
+except Exception as e:
+    AGGRID_IMPORT_ERR = e
+    HAVE_AGGRID = False
+    AgGrid = GridOptionsBuilder = None
+    print("[AgGrid] Import failed:", repr(e))
+    print("[AgGrid] Traceback:\n", traceback.format_exc())
+
 # ---------- Config ----------
 DELIMS_PATTERN = r"[;,+/|]"
 MAX_MULTISELECT_OPTIONS = 200
@@ -35,7 +45,7 @@ BOOL_TRUE  = {"true","1","yes","y","t"}
 BOOL_FALSE = {"false","0","no","n","f"}
 APP_DIR = Path(__file__).resolve().parent
 
-# ---------- Tips for specific filters (permanently visible) ----------
+# ---------- Tips (permanent) ----------
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+","", s.lower())
 
@@ -144,6 +154,7 @@ def discover_repo_csv() -> Path | None:
     return candidates[0].resolve() if candidates else None
 
 # ---------- Data source (no dataset UI; auto-load from repo) ----------
+APP_DIR = Path(__file__).resolve().parent
 csv_path = discover_repo_csv()
 if not csv_path:
     st.error("No dataset found. Put a CSV in the repo root (e.g., `bhb_studies.csv`) or set `DATASET_PATH` in Secrets.")
@@ -152,7 +163,7 @@ if not csv_path:
 df = pd.read_csv(csv_path, low_memory=False)
 st.caption(f"Loaded dataset: `{csv_path.name}` • {len(df):,} rows, {df.shape[1]} columns")
 
-# ---------- Sidebar: dynamic filters with PERMANENT tips ----------
+# ---------- Sidebar: dynamic filters with permanent tips ----------
 filters_meta = []
 with st.sidebar:
     st.header("🔎 Column Filters")
@@ -168,9 +179,9 @@ with st.sidebar:
         st.markdown(f"**{col}**")
         hint = tip_for(col)
         if hint:
-            st.caption(hint)  # ← permanent tip under the label
+            st.caption(hint)
 
-        # ID-like (except PMID) → equals-any input (no tooltip help)
+        # ID-like (except PMID) → equals-any input
         if is_id_like(col):
             txt = st.text_input("Equals any of …", value="", key=keybase+"_idany")
             filters_meta.append({"col": col, "type": "id_any", "value": txt})
@@ -276,9 +287,10 @@ if HAVE_AGGRID:
         height=grid_height,
         theme="alpine",
         fit_columns_on_grid_load=False,
-        columns_auto_size_mode=ColumnsAutoSizeMode.NO_AUTOSIZE,
+        columns_auto_size_mode=(ColumnsAutoSizeMode.NO_AUTOSIZE if ColumnsAutoSizeMode else None),
     )
 else:
+    st.info("Interactive grid unavailable (streamlit-aggrid not installed). Showing a simple table instead.")
     st.dataframe(result, use_container_width=True, height=grid_height)
 
 st.download_button(
@@ -293,3 +305,21 @@ st.download_button(
     "filtered_rows.csv",
     mime="text/csv",
 )
+
+# ---------- Debug panel (shows in UI AND prints to logs) ----------
+with st.sidebar.expander("🪲 Debug", expanded=False):
+    import platform
+    st.write("**Python**:", sys.version.split()[0], platform.platform())
+    st.write("**Streamlit**:", st.__version__)
+    try:
+        import importlib.metadata as ilm
+        ag_ver = ilm.version("streamlit-aggrid")
+        st.write("**streamlit-aggrid**:", ag_ver)
+        print("[AgGrid] Detected streamlit-aggrid version:", ag_ver)
+    except Exception as e:
+        st.write("**streamlit-aggrid**: not installed or not detected:", repr(e))
+        print("[AgGrid] streamlit-aggrid not detected:", repr(e))
+    st.write("**HAVE_AGGRID**:", HAVE_AGGRID)
+    if AGGRID_IMPORT_ERR:
+        st.write("**Import error**:", repr(AGGRID_IMPORT_ERR))
+        st.code(traceback.format_exc(), language="text")
