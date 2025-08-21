@@ -36,23 +36,6 @@ This filter tool uses AI to extract information from abstracts. The text exactly
 Processing of the extracted data should make much easier for researchers to find studies most relevant to their interest. As big part of BHB research focus on its signalling effect, AI was also used to extract proposed targets of BHB from each of the abstracts. Targets are standardized to their official gene names so they can be quickly used for enrichment analysis and other bioinformatics tools.
 """)
 
-# Make sure the paging panel is visible and clickable in Streamlit containers
-st.markdown("""
-<style>
-.ag-theme-alpine .ag-paging-panel{
-  position: sticky; bottom: 0;
-  background: var(--background-color, #fff);
-  z-index: 3;                 /* sit on top of surrounding containers */
-  pointer-events: all !important;
-  padding: 8px 16px;
-}
-.ag-root-wrapper, .ag-root-wrapper-body {
-  overflow: auto !important;  /* allow the grid to scroll without clipping the pager */
-}
-</style>
-""", unsafe_allow_html=True)
-
-
 # ---------- Config ----------
 DELIMS_PATTERN = r"[;,+/|]"
 MAX_MULTISELECT_OPTIONS = 200
@@ -330,44 +313,27 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
-PAGE_SIZE  = 20
-GRID_HEIGHT = 700  # give the grid enough room so the pager isn't cramped
+PAGE_SIZE = 20
+GRID_HEIGHT = 600
 
 if HAVE_AGGRID:
     st.caption("✅ AgGrid active (theme: alpine, paginated).")
+    gob = GridOptionsBuilder.from_dataframe(result)
+    try:
+        gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=PAGE_SIZE)
+    except TypeError:
+        gob.configure_pagination(paginationPageSize=PAGE_SIZE)
+    gob.configure_default_column(filter=True, sortable=True, resizable=True)
+    gob.configure_grid_options(domLayout="normal")  # keep pagination bar and horizontal scroll
 
-    # Force pagination directly in gridOptions (more reliable across versions)
-    grid_opts = {
-        "defaultColDef": {
-            "filter": True,
-            "sortable": True,
-            "resizable": True,
-            "wrapText": False,
-            "minWidth": 140,
-        },
-        "pagination": True,
-        "paginationPageSize": PAGE_SIZE,
-        "paginationAutoPageSize": False,
-        "suppressPaginationPanel": False,
-        "domLayout": "normal",  # needed for pagination bar + horizontal scrollbar
-    }
-
-    # Sanity readout (also prints to logs)
-    st.caption(
-        f"Pagination: {grid_opts.get('pagination')} • "
-        f"Page size: {grid_opts.get('paginationPageSize')} • "
-        f"Layout: {grid_opts.get('domLayout')}"
-    )
-    print("[AgGrid] gridOptions:", grid_opts)
-
+    grid_opts = gob.build()
     AgGrid(
         result,
         gridOptions=grid_opts,
         height=GRID_HEIGHT,
         theme="alpine",
-        fit_columns_on_grid_load=False,  # no squish
+        fit_columns_on_grid_load=False,  # no horizontal squish
         columns_auto_size_mode=(ColumnsAutoSizeMode.FIT_CONTENTS if ColumnsAutoSizeMode else None),
-        key="main_grid",
     )
 else:
     st.caption("⚠️ Falling back to simple table (AgGrid not loaded).")
@@ -387,7 +353,6 @@ st.download_button(
     "filtered_rows.csv",
     mime="text/csv",
 )
-
 
 # ---------- Debug expander ----------
 with st.sidebar.expander("🪲 Grid debug", expanded=False):
