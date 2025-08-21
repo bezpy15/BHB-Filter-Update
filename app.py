@@ -4,6 +4,7 @@
 from io import BytesIO
 import os, re, sys, traceback, numpy as np, pandas as pd, streamlit as st
 from pathlib import Path
+import warnings
 
 # ---------- Page ----------
 st.set_page_config(page_title="BHB Study Finder", page_icon="🔬", layout="wide")
@@ -108,12 +109,21 @@ def coerce_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 def is_datetime_series(series: pd.Series, min_frac_dt: float = 0.8) -> bool:
-    s = pd.to_datetime(series, errors="coerce", infer_datetime_format=True, utc=False)
+    fmt = guess_datetime_format(series)
+    s = safe_to_datetime(series, fmt)
     frac = s.notna().mean() if len(s) else 0.0
     return frac >= min_frac_dt
 
-def coerce_datetime(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, errors="coerce", infer_datetime_format=True, utc=False)
+def coerce_datetime(series: pd.Series, fmt: str | None = None) -> pd.Series:
+    if fmt is None:
+        fmt = guess_datetime_format(series)
+    return safe_to_datetime(series, fmt)
+
+
+def coerce_datetime(series: pd.Series, fmt: str | None = None) -> pd.Series:
+    if fmt is None:
+        fmt = guess_datetime_format(series)
+    return safe_to_datetime(series, fmt)
 
 def is_booleanish_series(series: pd.Series, min_frac_bool: float = 0.9) -> bool:
     s = series.dropna().astype(str).str.strip().str.lower()
@@ -152,6 +162,42 @@ def discover_repo_csv() -> Path | None:
     if not candidates and data_dir.exists():
         candidates = list(data_dir.glob("*.csv"))
     return candidates[0].resolve() if candidates else None
+
+def guess_datetime_format(series: pd.Series, sample_size: int = 500) -> str | None:
+    """
+    Try common date formats on a sample; return the best format if it parses ≥80% of values.
+    """
+    candidates = [
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",         # ISO without timezone
+        "%Y-%m-%dT%H:%M:%S.%f",      # ISO with ms
+    ]
+    s = series.dropna().astype(str)
+    if len(s) > sample_size:
+        s = s.sample(sample_size, random_state=0)
+    best_fmt, best_rate = None, 0.0
+    for fmt in candidates:
+        parsed = pd.to_datetime(s, errors="coerce", format=fmt, utc=False)
+        rate = parsed.notna().mean()
+        if rate > best_rate:
+            best_rate, best_fmt = rate, fmt
+    return best_fmt if best_rate >= 0.8 else None
+
+def safe_to_datetime(series: pd.Series, fmt: str | None) -> pd.Series:
+    """
+    Parse datetimes quietly (no pandas 2.3 warnings). If fmt is None, still parse but suppress
+    'Could not infer format' UserWarnings.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*infer_datetime_format.*", category=UserWarning)
+        warnings.filterwarnings("ignore", message="Could not infer format.*", category=UserWarning)
+        return pd.to_datetime(series, errors="coerce", format=fmt, utc=False)
+
 
 # ---------- Data source (no dataset UI; auto-load from repo) ----------
 APP_DIR = Path(__file__).resolve().parent
@@ -207,11 +253,18 @@ with st.sidebar:
             filters_meta.append({"col": col, "type": "range", "value": rng, "excl_na": excl_na})
 
         elif try_dt:
-            s_dt = coerce_datetime(series)
+    # Detect best format once and reuse (faster + no warnings)
+            dt_fmt = guess_datetime_format(series)
+            s_dt = coerce_datetime(series, dt_fmt)
             dmin = s_dt.min().date(); dmax = s_dt.max().date()
             date_range = st.date_input("Date range", (dmin, dmax), key=keybase+"_daterange")
             excl_na = st.checkbox("Exclude missing", value=False, key=keybase+"_exclna_dt")
-            filters_meta.append({"col": col, "type": "date_range", "value": date_range, "excl_na": excl_na})
+            filters_meta.append({
+                "col": col, "type": "date_range",
+                "value": date_range, "excl_na": excl_na,
+                "dt_format": dt_fmt  # <- store format so we can reuse during filtering
+            })
+
 
         elif try_bool:
             choice = st.selectbox("Value", ["Any", "True", "False"], key=keybase+"_bool")
@@ -243,12 +296,14 @@ for f in filters_meta:
         if not f.get("excl_na", False): cond = cond | s_num.isna()
         mask &= cond
     elif typ == "date_range":
-        s_dt = coerce_datetime(df[col])
+        fmt = f.get("dt_format")
+        s_dt = coerce_datetime(df[col], fmt)
         if isinstance(val, tuple) and len(val) == 2:
             lo, hi = pd.to_datetime(val[0]), pd.to_datetime(val[1])
             cond = s_dt.between(lo, hi)
-            if not f.get("excl_na", False): cond = cond | s_dt.isna()
-            mask &= cond
+            if not f.get("excl_na", False):
+            cond = cond | s_dt.isna()
+        mask &= cond
     elif typ == "bool":
         if val in ("True", "False"):
             s_b = coerce_bool(df[col]); want = (val == "True")
