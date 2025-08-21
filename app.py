@@ -318,15 +318,32 @@ GRID_HEIGHT = 600
 
 if HAVE_AGGRID:
     st.caption("✅ AgGrid active (theme: alpine, paginated).")
+
     gob = GridOptionsBuilder.from_dataframe(result)
-    try:
-        gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=PAGE_SIZE)
-    except TypeError:
-        gob.configure_pagination(paginationPageSize=PAGE_SIZE)
     gob.configure_default_column(filter=True, sortable=True, resizable=True)
-    gob.configure_grid_options(domLayout="normal")  # keep pagination bar and horizontal scroll
+
+    # 🔒 FORCE pagination here (don’t rely on configure_pagination helper)
+    gob.configure_grid_options(
+        pagination=True,
+        paginationPageSize=PAGE_SIZE,
+        paginationAutoPageSize=False,
+        suppressPaginationPanel=False,  # make sure the bar is visible
+        domLayout="normal",             # needed for a visible pagination bar + horiz. scrollbar
+    )
 
     grid_opts = gob.build()
+
+    # Small visible + logged sanity check
+    st.caption(
+        f"Pagination: {grid_opts.get('pagination')} • "
+        f"Page size: {grid_opts.get('paginationPageSize')} • "
+        f"Layout: {grid_opts.get('domLayout')}"
+    )
+    print("[AgGrid] gridOptions pagination:",
+          grid_opts.get("pagination"),
+          "pageSize:", grid_opts.get("paginationPageSize"),
+          "domLayout:", grid_opts.get("domLayout"))
+
     AgGrid(
         result,
         gridOptions=grid_opts,
@@ -353,6 +370,7 @@ st.download_button(
     "filtered_rows.csv",
     mime="text/csv",
 )
+
 
 # ---------- Debug expander ----------
 with st.sidebar.expander("🪲 Grid debug", expanded=False):
