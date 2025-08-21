@@ -167,13 +167,17 @@ def discover_repo_csv() -> Path | None:
     # Prefer explicit path via Secrets/Env
     if "DATASET_PATH" in st.secrets:
         p = (APP_DIR / st.secrets["DATASET_PATH"]).resolve()
-        if p.exists(): return p
+        if p.exists():
+            return p
     if os.environ.get("DATASET_PATH"):
         p = (APP_DIR / os.environ["DATASET_PATH"]).resolve()
-        if p.exists(): return p
+        if p.exists():
+            return p
     # Common names in root
     for name in ("bhb_studies.csv", "studies.csv", "dataset.csv"):
-        p = (APP_DIR / name).resolve();  if p.exists(): return p
+        p = (APP_DIR / name).resolve()
+        if p.exists():
+            return p
     # Fallback: first CSV in root (then ./data)
     candidates = list(APP_DIR.glob("*.csv"))
     data_dir = APP_DIR / "data"
@@ -352,7 +356,7 @@ st.download_button(
 
 # ---------- Debug expander ----------
 with st.sidebar.expander("🪲 Grid debug", expanded=False):
-    import platform, importlib
+    import platform
     st.write("Python:", sys.version.split()[0], platform.platform())
     st.write("Streamlit:", st.__version__)
     try:
