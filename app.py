@@ -1,10 +1,26 @@
 # ==========================================================
-# BHB Study Finder — Dynamic Column Filters (repo CSV/root + AgGrid debug)
+# BHB Study Finder — Dynamic Column Filters (repo CSV + AgGrid)
 # ==========================================================
 from io import BytesIO
-import os, re, sys, traceback, numpy as np, pandas as pd, streamlit as st
+import os, re, sys, traceback, warnings, numpy as np, pandas as pd, streamlit as st
 from pathlib import Path
-import warnings
+
+# ---------- AgGrid import (robust) ----------
+HAVE_AGGRID = False
+AGGRID_ERR = None
+ColumnsAutoSizeMode = None
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder
+    HAVE_AGGRID = True
+except Exception as e:
+    AGGRID_ERR = e
+    AgGrid = GridOptionsBuilder = None
+# Optional enum; don't flip HAVE_AGGRID if this fails
+if HAVE_AGGRID:
+    try:
+        from st_aggrid.shared import ColumnsAutoSizeMode
+    except Exception:
+        ColumnsAutoSizeMode = None
 
 # ---------- Page ----------
 st.set_page_config(page_title="BHB Study Finder", page_icon="🔬", layout="wide")
@@ -20,25 +36,6 @@ This filter tool uses AI to extract information from abstracts. The text exactly
 Processing of the extracted data should make much easier for researchers to find studies most relevant to their interest. As big part of BHB research focus on its signalling effect, AI was also used to extract proposed targets of BHB from each of the abstracts. Targets are standardized to their official gene names so they can be quickly used for enrichment analysis and other bioinformatics tools.
 """)
 
-# ---------- AgGrid import with diagnostics ----------
-AGGRID_IMPORT_ERR = None
-HAVE_AGGRID = False
-ColumnsAutoSizeMode = None
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder
-    try:
-        from st_aggrid.shared import ColumnsAutoSizeMode
-    except Exception:
-        ColumnsAutoSizeMode = None  # older versions don't expose this
-    HAVE_AGGRID = True
-    print("[AgGrid] Import successful.")
-except Exception as e:
-    AGGRID_IMPORT_ERR = e
-    HAVE_AGGRID = False
-    AgGrid = GridOptionsBuilder = None
-    print("[AgGrid] Import failed:", repr(e))
-    print("[AgGrid] Traceback:\n", traceback.format_exc())
-
 # ---------- Config ----------
 DELIMS_PATTERN = r"[;,+/|]"
 MAX_MULTISELECT_OPTIONS = 200
@@ -46,7 +43,7 @@ BOOL_TRUE  = {"true","1","yes","y","t"}
 BOOL_FALSE = {"false","0","no","n","f"}
 APP_DIR = Path(__file__).resolve().parent
 
-# ---------- Tips (permanent) ----------
+# ---------- Permanent tips for specific filters ----------
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+","", s.lower())
 
@@ -65,12 +62,13 @@ TIPS = {
 def normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
 
-def is_id_like(colname: str) -> bool:
-    n = normalize(colname)
-    return n in {"abstractid","pmcid","id","aid"} or n.endswith("id")
-
 def is_pmid_col(colname: str) -> bool:
     return normalize(colname) == "pmid"
+
+def is_id_like(colname: str) -> bool:
+    n = normalize(colname)
+    # treat other *ID columns as ID-like; exclude PMID (we don't render a filter for PMID)
+    return n in {"abstractid","pmcid","id","aid"} or (n.endswith("id") and n != "pmid")
 
 def sanitize_key(s: str) -> str:
     return "flt_" + re.sub(r"[^a-zA-Z0-9_]", "_", s)
@@ -100,13 +98,29 @@ def to_excel_bytes(df: pd.DataFrame):
     df.to_excel(bio, index=False)
     return bio.getvalue()
 
-def is_numeric_series(series: pd.Series, min_frac_numeric: float = 0.8) -> bool:
-    s = pd.to_numeric(series, errors="coerce")
-    frac = s.notna().mean() if len(s) else 0.0
-    return frac >= min_frac_numeric
+# ---- robust, quiet datetime parsing (no warnings) ----
+def guess_datetime_format(series: pd.Series, sample_size: int = 500) -> str | None:
+    candidates = [
+        "%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y",
+        "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+    ]
+    s = series.dropna().astype(str)
+    if len(s) > sample_size:
+        s = s.sample(sample_size, random_state=0)
+    best_fmt, best_rate = None, 0.0
+    for fmt in candidates:
+        parsed = pd.to_datetime(s, errors="coerce", format=fmt, utc=False)
+        rate = parsed.notna().mean()
+        if rate > best_rate:
+            best_rate, best_fmt = rate, fmt
+    return best_fmt if best_rate >= 0.8 else None
 
-def coerce_numeric(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce")
+def safe_to_datetime(series: pd.Series, fmt: str | None) -> pd.Series:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*infer_datetime_format.*", category=UserWarning)
+        warnings.filterwarnings("ignore", message="Could not infer format.*", category=UserWarning)
+        return pd.to_datetime(series, errors="coerce", format=fmt, utc=False)
 
 def is_datetime_series(series: pd.Series, min_frac_dt: float = 0.8) -> bool:
     fmt = guess_datetime_format(series)
@@ -119,11 +133,13 @@ def coerce_datetime(series: pd.Series, fmt: str | None = None) -> pd.Series:
         fmt = guess_datetime_format(series)
     return safe_to_datetime(series, fmt)
 
+def is_numeric_series(series: pd.Series, min_frac_numeric: float = 0.8) -> bool:
+    s = pd.to_numeric(series, errors="coerce")
+    frac = s.notna().mean() if len(s) else 0.0
+    return frac >= min_frac_numeric
 
-def coerce_datetime(series: pd.Series, fmt: str | None = None) -> pd.Series:
-    if fmt is None:
-        fmt = guess_datetime_format(series)
-    return safe_to_datetime(series, fmt)
+def coerce_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
 
 def is_booleanish_series(series: pd.Series, min_frac_bool: float = 0.9) -> bool:
     s = series.dropna().astype(str).str.strip().str.lower()
@@ -148,59 +164,24 @@ def clear_all_filters():
     st.rerun()
 
 def discover_repo_csv() -> Path | None:
+    # Prefer explicit path via Secrets/Env
     if "DATASET_PATH" in st.secrets:
         p = (APP_DIR / st.secrets["DATASET_PATH"]).resolve()
         if p.exists(): return p
     if os.environ.get("DATASET_PATH"):
         p = (APP_DIR / os.environ["DATASET_PATH"]).resolve()
         if p.exists(): return p
+    # Common names in root
     for name in ("bhb_studies.csv", "studies.csv", "dataset.csv"):
-        p = (APP_DIR / name).resolve()
-        if p.exists(): return p
+        p = (APP_DIR / name).resolve();  if p.exists(): return p
+    # Fallback: first CSV in root (then ./data)
     candidates = list(APP_DIR.glob("*.csv"))
     data_dir = APP_DIR / "data"
     if not candidates and data_dir.exists():
         candidates = list(data_dir.glob("*.csv"))
     return candidates[0].resolve() if candidates else None
 
-def guess_datetime_format(series: pd.Series, sample_size: int = 500) -> str | None:
-    """
-    Try common date formats on a sample; return the best format if it parses ≥80% of values.
-    """
-    candidates = [
-        "%Y-%m-%d",
-        "%Y/%m/%d",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y/%m/%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",         # ISO without timezone
-        "%Y-%m-%dT%H:%M:%S.%f",      # ISO with ms
-    ]
-    s = series.dropna().astype(str)
-    if len(s) > sample_size:
-        s = s.sample(sample_size, random_state=0)
-    best_fmt, best_rate = None, 0.0
-    for fmt in candidates:
-        parsed = pd.to_datetime(s, errors="coerce", format=fmt, utc=False)
-        rate = parsed.notna().mean()
-        if rate > best_rate:
-            best_rate, best_fmt = rate, fmt
-    return best_fmt if best_rate >= 0.8 else None
-
-def safe_to_datetime(series: pd.Series, fmt: str | None) -> pd.Series:
-    """
-    Parse datetimes quietly (no pandas 2.3 warnings). If fmt is None, still parse but suppress
-    'Could not infer format' UserWarnings.
-    """
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*infer_datetime_format.*", category=UserWarning)
-        warnings.filterwarnings("ignore", message="Could not infer format.*", category=UserWarning)
-        return pd.to_datetime(series, errors="coerce", format=fmt, utc=False)
-
-
-# ---------- Data source (no dataset UI; auto-load from repo) ----------
-APP_DIR = Path(__file__).resolve().parent
+# ---------- Data source (auto-load from repo; no dataset UI) ----------
 csv_path = discover_repo_csv()
 if not csv_path:
     st.error("No dataset found. Put a CSV in the repo root (e.g., `bhb_studies.csv`) or set `DATASET_PATH` in Secrets.")
@@ -209,7 +190,7 @@ if not csv_path:
 df = pd.read_csv(csv_path, low_memory=False)
 st.caption(f"Loaded dataset: `{csv_path.name}` • {len(df):,} rows, {df.shape[1]} columns")
 
-# ---------- Sidebar: dynamic filters with permanent tips ----------
+# ---------- Sidebar: dynamic filters (permanent tips) ----------
 filters_meta = []
 with st.sidebar:
     st.header("🔎 Column Filters")
@@ -243,17 +224,14 @@ with st.sidebar:
 
         if try_numeric:
             s_num = coerce_numeric(series)
-            if s_num.notna().any():
-                vmin = float(np.nanmin(s_num)); vmax = float(np.nanmax(s_num))
-            else:
-                vmin = 0.0; vmax = 0.0
+            vmin = float(np.nanmin(s_num)) if s_num.notna().any() else 0.0
+            vmax = float(np.nanmax(s_num)) if s_num.notna().any() else 0.0
             rng = st.slider("Range", min_value=float(vmin), max_value=float(vmax),
                             value=(float(vmin), float(vmax)), key=keybase+"_range")
             excl_na = st.checkbox("Exclude missing", value=False, key=keybase+"_exclna")
             filters_meta.append({"col": col, "type": "range", "value": rng, "excl_na": excl_na})
 
         elif try_dt:
-    # Detect best format once and reuse (faster + no warnings)
             dt_fmt = guess_datetime_format(series)
             s_dt = coerce_datetime(series, dt_fmt)
             dmin = s_dt.min().date(); dmax = s_dt.max().date()
@@ -262,9 +240,8 @@ with st.sidebar:
             filters_meta.append({
                 "col": col, "type": "date_range",
                 "value": date_range, "excl_na": excl_na,
-                "dt_format": dt_fmt  # <- store format so we can reuse during filtering
+                "dt_format": dt_fmt
             })
-
 
         elif try_bool:
             choice = st.selectbox("Value", ["Any", "True", "False"], key=keybase+"_bool")
@@ -285,34 +262,41 @@ with st.sidebar:
 mask = pd.Series([True] * len(df))
 for f in filters_meta:
     col = f["col"]; typ = f["type"]; val = f["value"]
+
     if typ == "id_any":
         ids = parse_id_equals_any(val)
         if ids:
             mask &= df[col].astype(str).isin(ids)
+
     elif typ == "range":
         lo, hi = val
         s_num = coerce_numeric(df[col])
         cond = s_num.between(lo, hi)
-        if not f.get("excl_na", False): cond = cond | s_num.isna()
+        if not f.get("excl_na", False):
+            cond = cond | s_num.isna()
         mask &= cond
+
     elif typ == "date_range":
         fmt = f.get("dt_format")
         s_dt = coerce_datetime(df[col], fmt)
         if isinstance(val, tuple) and len(val) == 2:
             lo, hi = pd.to_datetime(val[0]), pd.to_datetime(val[1])
             cond = s_dt.between(lo, hi)
-        if not f.get("excl_na", False):
-            cond = cond | s_dt.isna()
-        mask &= cond
+            if not f.get("excl_na", False):
+                cond = cond | s_dt.isna()
+            mask &= cond
+
     elif typ == "bool":
         if val in ("True", "False"):
             s_b = coerce_bool(df[col]); want = (val == "True")
             mask &= (s_b == want)
+
     elif typ == "multi":
         sel = [s for s in val if s != "Any"]
         if sel:
             sel_set = set(sel)
             mask &= df[col].apply(lambda v: match_tokens(v, sel_set))
+
     elif typ == "contains_any":
         query = str(val).strip()
         if query:
@@ -325,40 +309,32 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
-# Classic AgGrid look: paginated, readable column widths, horizontal scroll allowed
 PAGE_SIZE = 20
 GRID_HEIGHT = 600
 
 if HAVE_AGGRID:
+    st.caption("✅ AgGrid active (theme: alpine, paginated).")
     gob = GridOptionsBuilder.from_dataframe(result)
-
-    # Pagination like your original screenshot/code
     try:
         gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=PAGE_SIZE)
     except TypeError:
         gob.configure_pagination(paginationPageSize=PAGE_SIZE)
-
-    # Column defaults: keep funnels, sorting, resizing; do NOT force-fit
     gob.configure_default_column(filter=True, sortable=True, resizable=True)
+    gob.configure_grid_options(domLayout="normal")  # keep pagination bar and horizontal scroll
 
-    # Make sure the grid doesn't expand to full height (which hides pagination)
-    gob.configure_grid_options(domLayout="normal")
-
-    # Build & render
     grid_opts = gob.build()
     AgGrid(
         result,
         gridOptions=grid_opts,
         height=GRID_HEIGHT,
         theme="alpine",
-        fit_columns_on_grid_load=False,  # critical: no sizeColumnsToFit squish
-        # If your st-aggrid exposes this import, FIT_CONTENTS keeps widths natural.
-        columns_auto_size_mode=(
-            ColumnsAutoSizeMode.FIT_CONTENTS if ColumnsAutoSizeMode else None
-        ),
+        fit_columns_on_grid_load=False,  # no horizontal squish
+        columns_auto_size_mode=(ColumnsAutoSizeMode.FIT_CONTENTS if ColumnsAutoSizeMode else None),
     )
 else:
-    st.info("Interactive grid unavailable (streamlit-aggrid not installed). Showing a simple table instead.")
+    st.caption("⚠️ Falling back to simple table (AgGrid not loaded).")
+    if AGGRID_ERR:
+        st.code(f"AgGrid import error: {repr(AGGRID_ERR)}", language="text")
     st.dataframe(result, use_container_width=True, height=GRID_HEIGHT)
 
 st.download_button(
@@ -374,21 +350,16 @@ st.download_button(
     mime="text/csv",
 )
 
-
-# ---------- Debug panel (shows in UI AND prints to logs) ----------
-with st.sidebar.expander("🪲 Debug", expanded=False):
-    import platform
-    st.write("**Python**:", sys.version.split()[0], platform.platform())
-    st.write("**Streamlit**:", st.__version__)
+# ---------- Debug expander ----------
+with st.sidebar.expander("🪲 Grid debug", expanded=False):
+    import platform, importlib
+    st.write("Python:", sys.version.split()[0], platform.platform())
+    st.write("Streamlit:", st.__version__)
     try:
         import importlib.metadata as ilm
-        ag_ver = ilm.version("streamlit-aggrid")
-        st.write("**streamlit-aggrid**:", ag_ver)
-        print("[AgGrid] Detected streamlit-aggrid version:", ag_ver)
+        st.write("streamlit-aggrid:", ilm.version("streamlit-aggrid"))
     except Exception as e:
-        st.write("**streamlit-aggrid**: not installed or not detected:", repr(e))
-        print("[AgGrid] streamlit-aggrid not detected:", repr(e))
-    st.write("**HAVE_AGGRID**:", HAVE_AGGRID)
-    if AGGRID_IMPORT_ERR:
-        st.write("**Import error**:", repr(AGGRID_IMPORT_ERR))
-        st.code(traceback.format_exc(), language="text")
+        st.write("streamlit-aggrid:", f"not detected ({e})")
+    st.write("HAVE_AGGRID:", HAVE_AGGRID)
+    if AGGRID_ERR:
+        st.write("Import error:", repr(AGGRID_ERR))
