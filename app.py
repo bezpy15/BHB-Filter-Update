@@ -1,26 +1,17 @@
 # ==========================================================
-# BHB Study Finder — Dynamic Column Filters (repo CSV + AgGrid)
+# BHB Study Finder — Dynamic Column Filters (repo CSV + classic AgGrid)
 # ==========================================================
 from io import BytesIO
-import os, re, sys, traceback, warnings, numpy as np, pandas as pd, streamlit as st
 from pathlib import Path
+import os, re, numpy as np, pandas as pd, streamlit as st
 
-# ---------- AgGrid import (robust) ----------
-HAVE_AGGRID = False
-AGGRID_ERR = None
-ColumnsAutoSizeMode = None
+# ---------- AgGrid (classic) ----------
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder
     HAVE_AGGRID = True
-except Exception as e:
-    AGGRID_ERR = e
+except Exception:
+    HAVE_AGGRID = False
     AgGrid = GridOptionsBuilder = None
-# Optional enum; don't flip HAVE_AGGRID if this fails
-if HAVE_AGGRID:
-    try:
-        from st_aggrid.shared import ColumnsAutoSizeMode
-    except Exception:
-        ColumnsAutoSizeMode = None
 
 # ---------- Page ----------
 st.set_page_config(page_title="BHB Study Finder", page_icon="🔬", layout="wide")
@@ -37,11 +28,11 @@ Processing of the extracted data should make much easier for researchers to find
 """)
 
 # ---------- Config ----------
+APP_DIR = Path(__file__).resolve().parent
 DELIMS_PATTERN = r"[;,+/|]"
 MAX_MULTISELECT_OPTIONS = 200
 BOOL_TRUE  = {"true","1","yes","y","t"}
 BOOL_FALSE = {"false","0","no","n","f"}
-APP_DIR = Path(__file__).resolve().parent
 
 # ---------- Permanent tips for specific filters ----------
 def _norm(s: str) -> str:
@@ -67,7 +58,7 @@ def is_pmid_col(colname: str) -> bool:
 
 def is_id_like(colname: str) -> bool:
     n = normalize(colname)
-    # treat other *ID columns as ID-like; exclude PMID (we don't render a filter for PMID)
+    # Treat other *ID columns as ID-like; exclude PMID (we skip its filter entirely)
     return n in {"abstractid","pmcid","id","aid"} or (n.endswith("id") and n != "pmid")
 
 def sanitize_key(s: str) -> str:
@@ -98,54 +89,24 @@ def to_excel_bytes(df: pd.DataFrame):
     df.to_excel(bio, index=False)
     return bio.getvalue()
 
-# ---- robust, quiet datetime parsing (no warnings) ----
-def guess_datetime_format(series: pd.Series, sample_size: int = 500) -> str | None:
-    candidates = [
-        "%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y",
-        "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
-    ]
-    s = series.dropna().astype(str)
-    if len(s) > sample_size:
-        s = s.sample(sample_size, random_state=0)
-    best_fmt, best_rate = None, 0.0
-    for fmt in candidates:
-        parsed = pd.to_datetime(s, errors="coerce", format=fmt, utc=False)
-        rate = parsed.notna().mean()
-        if rate > best_rate:
-            best_rate, best_fmt = rate, fmt
-    return best_fmt if best_rate >= 0.8 else None
-
-def safe_to_datetime(series: pd.Series, fmt: str | None) -> pd.Series:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*infer_datetime_format.*", category=UserWarning)
-        warnings.filterwarnings("ignore", message="Could not infer format.*", category=UserWarning)
-        return pd.to_datetime(series, errors="coerce", format=fmt, utc=False)
-
-def is_datetime_series(series: pd.Series, min_frac_dt: float = 0.8) -> bool:
-    fmt = guess_datetime_format(series)
-    s = safe_to_datetime(series, fmt)
-    frac = s.notna().mean() if len(s) else 0.0
-    return frac >= min_frac_dt
-
-def coerce_datetime(series: pd.Series, fmt: str | None = None) -> pd.Series:
-    if fmt is None:
-        fmt = guess_datetime_format(series)
-    return safe_to_datetime(series, fmt)
-
 def is_numeric_series(series: pd.Series, min_frac_numeric: float = 0.8) -> bool:
     s = pd.to_numeric(series, errors="coerce")
-    frac = s.notna().mean() if len(s) else 0.0
-    return frac >= min_frac_numeric
+    return (s.notna().mean() if len(s) else 0.0) >= min_frac_numeric
 
 def coerce_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
+def is_datetime_series(series: pd.Series, min_frac_dt: float = 0.8) -> bool:
+    s = pd.to_datetime(series, errors="coerce", utc=False)
+    return (s.notna().mean() if len(s) else 0.0) >= min_frac_dt
+
+def coerce_datetime(series: pd.Series) -> pd.Series:
+    return pd.to_datetime(series, errors="coerce", utc=False)
+
 def is_booleanish_series(series: pd.Series, min_frac_bool: float = 0.9) -> bool:
     s = series.dropna().astype(str).str.strip().str.lower()
     ok = s.isin(BOOL_TRUE | BOOL_FALSE)
-    frac = ok.mean() if len(s) else 0.0
-    return frac >= min_frac_bool
+    return (ok.mean() if len(s) else 0.0) >= min_frac_bool
 
 def coerce_bool(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip().str.lower()
@@ -178,14 +139,14 @@ def discover_repo_csv() -> Path | None:
         p = (APP_DIR / name).resolve()
         if p.exists():
             return p
-    # Fallback: first CSV in root (then ./data)
+    # Fallback: first CSV in root, then ./data
     candidates = list(APP_DIR.glob("*.csv"))
     data_dir = APP_DIR / "data"
     if not candidates and data_dir.exists():
         candidates = list(data_dir.glob("*.csv"))
     return candidates[0].resolve() if candidates else None
 
-# ---------- Data source (auto-load from repo; no dataset UI) ----------
+# ---------- Data (auto-load from repo; no dataset section) ----------
 csv_path = discover_repo_csv()
 if not csv_path:
     st.error("No dataset found. Put a CSV in the repo root (e.g., `bhb_studies.csv`) or set `DATASET_PATH` in Secrets.")
@@ -194,7 +155,7 @@ if not csv_path:
 df = pd.read_csv(csv_path, low_memory=False)
 st.caption(f"Loaded dataset: `{csv_path.name}` • {len(df):,} rows, {df.shape[1]} columns")
 
-# ---------- Sidebar: dynamic filters (permanent tips) ----------
+# ---------- Sidebar: dynamic filters ----------
 filters_meta = []
 with st.sidebar:
     st.header("🔎 Column Filters")
@@ -202,7 +163,7 @@ with st.sidebar:
     st.button("🔁 Reset all filters", on_click=clear_all_filters)
 
     for col in df.columns:
-        if is_pmid_col(col):  # keep column visible but don't render a filter for it
+        if is_pmid_col(col):  # keep column visible but do not render a filter for PMID
             continue
 
         series = df[col]
@@ -236,16 +197,11 @@ with st.sidebar:
             filters_meta.append({"col": col, "type": "range", "value": rng, "excl_na": excl_na})
 
         elif try_dt:
-            dt_fmt = guess_datetime_format(series)
-            s_dt = coerce_datetime(series, dt_fmt)
+            s_dt = coerce_datetime(series)
             dmin = s_dt.min().date(); dmax = s_dt.max().date()
             date_range = st.date_input("Date range", (dmin, dmax), key=keybase+"_daterange")
             excl_na = st.checkbox("Exclude missing", value=False, key=keybase+"_exclna_dt")
-            filters_meta.append({
-                "col": col, "type": "date_range",
-                "value": date_range, "excl_na": excl_na,
-                "dt_format": dt_fmt
-            })
+            filters_meta.append({"col": col, "type": "date_range", "value": date_range, "excl_na": excl_na})
 
         elif try_bool:
             choice = st.selectbox("Value", ["Any", "True", "False"], key=keybase+"_bool")
@@ -265,7 +221,7 @@ with st.sidebar:
 # ---------- Apply filters ----------
 mask = pd.Series([True] * len(df))
 for f in filters_meta:
-    col = f["col"]; typ = f["type"]; val = f["value"]
+    col, typ, val = f["col"], f["type"], f["value"]
 
     if typ == "id_any":
         ids = parse_id_equals_any(val)
@@ -281,8 +237,7 @@ for f in filters_meta:
         mask &= cond
 
     elif typ == "date_range":
-        fmt = f.get("dt_format")
-        s_dt = coerce_datetime(df[col], fmt)
+        s_dt = coerce_datetime(df[col])
         if isinstance(val, tuple) and len(val) == 2:
             lo, hi = pd.to_datetime(val[0]), pd.to_datetime(val[1])
             cond = s_dt.between(lo, hi)
@@ -313,54 +268,14 @@ result = df.loc[mask].copy()
 # ---------- Results + downloads ----------
 st.subheader(f"📑 {len(result)} row{'s' if len(result)!=1 else ''} match your filters")
 
-PAGE_SIZE  = 20
-GRID_HEIGHT = 600
-
 if HAVE_AGGRID:
-    st.caption("✅ AgGrid active (theme: alpine, paginated).")
-
-    # Build from dataframe (lets st_aggrid create correct columnDefs/rowData)
     gob = GridOptionsBuilder.from_dataframe(result)
-
-    # Nice defaults; DO NOT fit-to-view (keeps widths readable + horiz. scroll)
-    gob.configure_default_column(filter=True, sortable=True, resizable=True, wrapText=False, minWidth=140)
-
-    # Ask for normal layout (shows pagination bar)
-    gob.configure_grid_options(domLayout="normal")
-
-    # Build options, then *force* pagination keys on the final dict
-    grid_opts = gob.build()
-    grid_opts["pagination"] = True
-    grid_opts["paginationAutoPageSize"] = False
-    grid_opts["paginationPageSize"] = PAGE_SIZE
-    grid_opts["suppressPaginationPanel"] = False
-
-    # Sanity readout (also printed to logs)
-    st.caption(
-        f"Pagination: {grid_opts.get('pagination')} • "
-        f"Page size: {grid_opts.get('paginationPageSize')} • "
-        f"Layout: {grid_opts.get('domLayout')}"
-    )
-    print("[AgGrid] gridOptions ->",
-          "pagination:", grid_opts.get("pagination"),
-          "pageSize:", grid_opts.get("paginationPageSize"),
-          "domLayout:", grid_opts.get("domLayout"))
-
-    AgGrid(
-        result,
-        gridOptions=grid_opts,
-        height=GRID_HEIGHT,
-        theme="alpine",
-        fit_columns_on_grid_load=False,  # avoid squish
-        columns_auto_size_mode=(ColumnsAutoSizeMode.FIT_CONTENTS if ColumnsAutoSizeMode else None),
-        reload_data=True,                # ensure grid refreshes after filter changes
-        key="main_grid",
-    )
+    gob.configure_pagination(paginationPageSize=20)  # ← classic pager
+    gob.configure_default_column(filter=True, sortable=True, resizable=True)
+    AgGrid(result, gridOptions=gob.build(), height=450, theme="alpine")
 else:
-    st.caption("⚠️ Falling back to simple table (AgGrid not loaded).")
-    if AGGRID_ERR:
-        st.code(f"AgGrid import error: {repr(AGGRID_ERR)}", language="text")
-    st.dataframe(result, use_container_width=True, height=GRID_HEIGHT)
+    st.info("Interactive grid unavailable; showing a simple table instead.")
+    st.dataframe(result, use_container_width=True, height=450)
 
 st.download_button(
     "💾 Excel",
@@ -374,18 +289,3 @@ st.download_button(
     "filtered_rows.csv",
     mime="text/csv",
 )
-
-
-# ---------- Debug expander ----------
-with st.sidebar.expander("🪲 Grid debug", expanded=False):
-    import platform
-    st.write("Python:", sys.version.split()[0], platform.platform())
-    st.write("Streamlit:", st.__version__)
-    try:
-        import importlib.metadata as ilm
-        st.write("streamlit-aggrid:", ilm.version("streamlit-aggrid"))
-    except Exception as e:
-        st.write("streamlit-aggrid:", f"not detected ({e})")
-    st.write("HAVE_AGGRID:", HAVE_AGGRID)
-    if AGGRID_ERR:
-        st.write("Import error:", repr(AGGRID_ERR))
